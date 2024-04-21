@@ -29,6 +29,7 @@ import socket
 import multiprocessing
 import warnings
 import contextlib
+import shlex
 from .database import _Database
 from .schedulers import _JobStatus
 import datetime
@@ -40,6 +41,7 @@ except ImportError:  # python 3.x
 
 logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(level=logging.WARNING)
+rng = numpy.random.RandomState(None)
 
 
 class Trial(object):
@@ -79,10 +81,16 @@ class Study(object):
             the first free port in the range `8880` to `9999` is found and used.
         disable_dashboard (bool): option to not run the dashboard.
         output_dir (str): directory path for CSV results.
+        random_seed (int): seed to use for NumPy random number generators
+            throughout.
 
     """
-    def __init__(self, parameters, algorithm, lower_is_better,
-                 stopping_rule=None, dashboard_port=None,
+    def __init__(self,
+                 parameters,
+                 algorithm,
+                 lower_is_better,
+                 stopping_rule=None,
+                 dashboard_port=None,
                  disable_dashboard=False,
                  output_dir=None):
         self.parameters = parameters
@@ -110,7 +118,7 @@ class Study(object):
         else:
             self.dashboard_process = None
 
-    def add_observation(self, trial, iteration, objective, context={}):
+    def add_observation(self, trial, objective, iteration=1, context={}):
         """
         Add a single observation of the objective value for a given trial.
         
@@ -122,6 +130,14 @@ class Study(object):
             context (dict): other metrics or values to record.
         """
         assert isinstance(trial, Trial), "Trial must be sherpa.core.Trial"
+        if not self.results.empty and\
+                ((self.results['Trial-ID'] == trial.id)
+                     & (self.results['Iteration'] == iteration)).any():
+            raise ValueError("Observation for Trial-ID {} at Iteration {} "
+                             "already exists.".format(trial.id, iteration))
+        if not all(p.name in trial.parameters for p in self.parameters):
+            raise ValueError("The trial is missing parameter entries. It "
+                             "may not be from this study.")
 
         row = [
             ('Trial-ID', trial.id),
@@ -253,6 +269,8 @@ class Study(object):
         Returns:
             pandas.DataFrame: row of the best result.
         """
+        if self.results.empty:
+            return {}
         return self.algorithm.get_best_result(parameters=self.parameters,
                                               results=self.results,
                                               lower_is_better=
@@ -288,11 +306,15 @@ class Study(object):
                                        kwargs={'port': port,
                                                'debug': True,
                                                'use_reloader': False,
-                                               'host': '',
+                                               'host': '0.0.0.0',
                                                'threaded': True})
         msg = "\n" + "-"*55 + "\n"
-        msg += "SHERPA Dashboard running. Access via\nhttp://{}:{} if on a cluster or\nhttp://{}:{} if running locally.".format(
-            socket.gethostbyname(socket.gethostname()), port, "localhost", port)
+        msg += "SHERPA Dashboard running. Access via\nhttp://{}:{} or " \
+               "\nhttp://{}:{} if on a cluster, or " \
+               "\nhttp://{}:{} if running locally.".format(
+               socket.gethostbyname(socket.gethostname()), port,
+               socket.gethostname(), port,
+               "localhost", port)
         msg += "\n" + "-"*55
         logger.info(msg)
         
@@ -617,7 +639,7 @@ def optimize(parameters, algorithm, lower_is_better,
                   disable_dashboard=disable_dashboard)
 
     if command:
-        runner_command = command.split(' ')
+        runner_command = shlex.split(command)
     elif filename:
         runner_command = ['python', filename]
     else:
@@ -773,10 +795,10 @@ class Continuous(Parameter):
     def sample(self):
         try:
             if self.scale == 'log':
-                return 10**numpy.random.uniform(low=numpy.log10(self.range[0]),
+                return 10**rng.uniform(low=numpy.log10(self.range[0]),
                                                 high=numpy.log10(self.range[1]))
             else:
-                return numpy.random.uniform(low=self.range[0], high=self.range[1])
+                return rng.uniform(low=self.range[0], high=self.range[1])
         except ValueError as e:
             raise ValueError("{} causes error {}".format(self.name, e))
 
@@ -796,10 +818,10 @@ class Discrete(Parameter):
     def sample(self):
         try:
             if self.scale == 'log':
-                return int(10**numpy.random.uniform(low=numpy.log10(self.range[0]),
+                return int(10**rng.uniform(low=numpy.log10(self.range[0]),
                                                 high=numpy.log10(self.range[1])))
             else:
-                return numpy.random.randint(low=self.range[0], high=self.range[1])
+                return rng.randint(low=self.range[0], high=self.range[1])
         except ValueError as e:
             raise ValueError("{} causes error {}".format(self.name, e))
 
@@ -813,7 +835,7 @@ class Choice(Parameter):
         self.type = type(self.range[0])
 
     def sample(self):
-        i = numpy.random.randint(low=0, high=len(self.range))
+        i = rng.randint(low=0, high=len(self.range))
         return self.range[i]
 
 
@@ -826,7 +848,7 @@ class Ordinal(Parameter):
         self.type = type(self.range[0])
 
     def sample(self):
-        i = numpy.random.randint(low=0, high=len(self.range))
+        i = rng.randint(low=0, high=len(self.range))
         return self.range[i]
 
 

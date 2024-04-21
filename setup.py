@@ -29,13 +29,22 @@ REQUIRED = [
     'pandas>=0.20.3',
     'pymongo>=3.5.1',
     'numpy>=1.8.2',
-    'scipy>=1.0.0',
+    'scipy>=1.0.0,<=1.4.1',
     'scikit-learn>=0.19.1',
-    'flask>=0.12.2'
+    'flask>=0.12.2',
+    'GPyOpt>=1.2.5',
+    'matplotlib'
 ]
 
-PARALLEL = ['pymongo>=3.5.1', 'drmaa>=0.7.7']
-REQUIRED += PARALLEL
+if sys.version_info < (3, 4):
+    REQUIRED += ['enum34']
+
+# if args.parallel:
+#     PARALLEL = ['pymongo>=3.5.1', 'drmaa>=0.7.7']
+#     REQUIRED += PARALLEL
+#     print("DRMAA path needs to be set e.g.:"
+#           "export DRMAA_LIBRARY_PATH=/usr/lib/libdrmaa.so.1.0\n"
+#           "See https://pypi.python.org/pypi/drmaa for details.")
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -81,9 +90,9 @@ class UploadCommand(Command):
 # Where the magic happens:
 setup(
     name=NAME,
-    version='1.0.0',
+    version='1.0.6',
     description=DESCRIPTION,
-    long_description=long_description,
+    long_description='',
     author=AUTHOR,
     author_email=EMAIL,
     url=URL,
@@ -114,6 +123,4 @@ setup(
     },
 )
 
-print("DRMAA path needs to be set e.g.:"
-      "export DRMAA_LIBRARY_PATH=/usr/lib/libdrmaa.so.1.0\n"
-      "See https://pypi.python.org/pypi/drmaa for details.")
+

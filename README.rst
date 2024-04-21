@@ -7,12 +7,15 @@ SHERPA: A Python Hyperparameter Optimization Library
     :height: 150px
     :alt: SHERPA logo
 
+
 .. image:: https://img.shields.io/badge/License-GPL%20v3-blue.svg
    :target: https://www.gnu.org/licenses/gpl-3.0
    
-.. image:: https://readthedocs.org/projects/parameter-sherpa/badge/?version=latest
-    :target: https://parameter-sherpa.readthedocs.io/en/latest/?badge=latest
-    :alt: Documentation Status
+    
+.. image:: https://travis-ci.org/sherpa-ai/sherpa.svg?branch=master
+    :target: https://travis-ci.org/sherpa-ai/sherpa.svg?branch=master
+    :alt: Build Status
+    
 
 .. image:: https://pepy.tech/badge/parameter-sherpa
    :target: https://pepy.tech/project/parameter-sherpa
@@ -21,8 +24,8 @@ SHERPA: A Python Hyperparameter Optimization Library
 SHERPA is a Python library for hyperparameter tuning of machine learning models. It provides:
 
 * hyperparameter optimization for machine learning researchers
-* it can be used with any Python machine learning library such as Keras, Tensorflow, or Scikit-Learn
-* a choice of hyperparameter optimization algorithms such as **Bayesian optimization via GPyOpt**, **Asynchronous Successive Halving** (aka Hyperband), and **Population Based Training**.
+* it can be used with any Python machine learning library such as Keras, Tensorflow, PyTorch, or Scikit-Learn
+* a choice of hyperparameter optimization algorithms such as **Bayesian optimization via GPyOpt** (`example notebook <https://github.com/sherpa-ai/sherpa/tree/master/examples/keras_mnist_mlp.ipynb>`_), **Asynchronous Successive Halving** (aka Hyperband) (`example notebook <https://github.com/sherpa-ai/sherpa/tree/master/examples/keras_mnist_mlp_successive_halving.ipynb>`_), and **Population Based Training** (`example notebook <https://github.com/sherpa-ai/sherpa/tree/master/examples/keras_mnist_mlp_population_based_training.ipynb>`_).
 * **parallel** computation that can be fitted to the user's needs
 * a live **dashboard** for the exploratory analysis of results.
 
@@ -30,17 +33,30 @@ Clone from GitHub to get the latest version or install via ``pip install paramet
 optimizations. Take a look at the demo
 video by clicking on the image below or read on to find out more.
 
-.. image:: http://img.youtube.com/vi/L95sasMLgP4/0.jpg
-   :target: https://www.youtube.com/watch?feature=player_embedded&v=L95sasMLgP4
+*We would love to hear what you think of Sherpa! Tell us how we can improve via our* Feedback-Form_.
+
+.. _Feedback-Form: https://forms.gle/b3HoyJZHjQnYtv677
+
+
+.. image:: http://img.youtube.com/vi/-exnF3uv0Ws/0.jpg
+   :target: https://www.youtube.com/watch?feature=player_embedded&v=-exnF3uv0Ws
+
 
 If you use SHERPA in your research please cite:
 
 ::
 
-    @article{hertel2018sherpa,
-      title={Sherpa: Hyperparameter Optimization for Machine Learning Models},
-      author={Hertel, Lars and Collado, Julian and Sadowski, Peter and Baldi, Pierre},
-      year={2018}
+    @article{hertel2020sherpa,
+       title={Sherpa: Robust Hyperparameter Optimization for Machine Learning},
+       author={Lars Hertel and Julian Collado and Peter Sadowski and Jordan Ott and Pierre Baldi},
+       journal={SoftwareX},
+       volume={},
+       number={},
+       pages={},
+       note={In press.}
+       year={2020},
+       note  ={Also arXiv:2005.04048. Software available at: https://github.com/sherpa-ai/sherpa},
+       publisher={}
     }
 
 From Keras to Sherpa in 30 seconds

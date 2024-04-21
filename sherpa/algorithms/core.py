@@ -23,13 +23,10 @@ import numpy
 import logging
 import sherpa
 import pandas
-import scipy.stats
-import scipy.optimize
 import sklearn.gaussian_process
 from sherpa.core import Choice, Continuous, Discrete, Ordinal, AlgorithmState
+from sherpa.core import rng as sherpa_rng
 import sklearn.model_selection
-from sklearn import preprocessing
-import warnings
 import collections
 
 
@@ -40,6 +37,8 @@ class Algorithm(object):
     """
     Abstract algorithm that generates new set of parameters.
     """
+    allows_repetition = False
+
     def get_suggestion(self, parameters, results, lower_is_better):
         """
         Returns a suggestion for parameter values.
@@ -80,6 +79,29 @@ class Algorithm(object):
         return best_result
 
 
+class Chain(Algorithm):
+    """
+    Allows to compose algorithms into a schedule by repeating an algorithm
+    or chaining different algorithms while maintaining the same results table.
+
+    Args:
+        algorithms (List[sherpa.algorithms.Algorithm]): the algorithms to run,
+            each algorithm must have a maximum number of trials specified for
+            the next algorithm to run.
+    """
+    def __init__(self, algorithms):
+        self.algorithms = algorithms
+        self.alg_counter = 0
+
+    def get_suggestion(self, parameters, results, lower_is_better):
+        config = self.algorithms[self.alg_counter].get_suggestion(parameters, results, lower_is_better)
+        if (config is None or config == AlgorithmState.DONE) and self.alg_counter < len(self.algorithms)-1:
+            self.alg_counter += 1
+            print("Next algorithm")
+            config = self.get_suggestion(parameters, results, lower_is_better)
+        return config
+
+
 class Repeat(Algorithm):
     """
     Takes another algorithm and repeats every hyperparameter configuration a
@@ -95,13 +117,17 @@ class Repeat(Algorithm):
             suggestion until all repetitions are completed. This can be useful
             when the repeats have impact on sequential decision making in the
             wrapped algorithm.
+        agg (bool): whether to aggregate repetitions before passing them to the
+            parameter generating algorithm.
     """
-    def __init__(self, algorithm, num_times=5, wait_for_completion=False):
+    def __init__(self, algorithm, num_times=5, wait_for_completion=False, agg=False):
+        assert algorithm.allows_repetition
         self.algorithm = algorithm
         self.num_times = num_times
-        self.queue = []
+        self.queue = collections.deque()
         self.prev_completed = 0
         self.wait_for_completion = wait_for_completion
+        self.agg = agg
 
     def get_suggestion(self, parameters, results=None, lower_is_better=True):
         if len(self.queue) == 0:
@@ -111,25 +137,99 @@ class Repeat(Algorithm):
                         completed) < self.prev_completed + self.num_times):
                     return AlgorithmState.WAIT
                 self.prev_completed += self.num_times
-                aggregate_results = completed.groupby([p.name for p in parameters]
-                                                    + ['Status']) \
-                                             .agg(['mean', 'var', 'count']) \
-                                             .loc[:, 'Objective'] \
-                                             .reset_index() \
-                                             .assign(varObjective=lambda x: x['var'] / x['count']) \
-                                             .rename({'mean': 'Objective'},
-                                                     axis=1) \
-                                             .drop('var', axis=1) \
-                                             .query("count >= {}".format(
-                                                                self.num_times))
+                aggregate_results = Repeat.aggregate_results(results,
+                                                        parameters,
+                                                        min_count=self.num_times)
             else:
                 aggregate_results = None
             suggestion = self.algorithm.get_suggestion(parameters=parameters,
-                                                       results=aggregate_results,
+                                                       results=aggregate_results if self.agg else results,
                                                        lower_is_better=lower_is_better)
             self.queue += [suggestion] * self.num_times
 
-        return self.queue.pop()
+        return self.queue.popleft()
+
+    def get_best_result(self, parameters, results, lower_is_better):
+        agg_results = self.aggregate_results(results=results,
+                                             parameters=parameters,
+                                             min_count=self.num_times)
+
+        if agg_results.empty:
+            return {}
+
+        # Get best result so far
+        best_idx = (agg_results.loc[:, 'Objective'].idxmin()
+                    if lower_is_better
+                    else agg_results.loc[:, 'Objective'].idxmax())
+
+        if not numpy.isfinite(best_idx):
+            # Can happen if there are no valid results,
+            # best_idx=nan when results are nan.
+            alglogger.warning('Empty results file! Returning empty dictionary.')
+            return {}
+
+        best_result = agg_results.loc[best_idx, :].to_dict('records')[0]
+        best_result.pop('Status')
+        return best_result
+
+    @staticmethod
+    def aggregate_results(results, parameters, min_count=0):
+        """
+        A helper function to aggregate results for repeated trials.
+
+        Groups results by parameter values and computes mean and standard error of
+        the mean. The returned dataframe's Objective column is the mean within
+        groups. The standard error is denoted ObjectiveStdErr.
+
+        # Arguments:
+            results (pandas.Dataframe): the results dataframe.
+            min_count (int): the minimum count within groups. Groups with fewer
+                observations than min_count are excluded from the results.
+
+        # Returns:
+            pandas.Dataframe: the aggregated dataframe.
+        """
+        intermediate = results.query("Status == 'INTERMEDIATE'")
+        completed = results.query("Status != 'INTERMEDIATE'")
+
+        # aggregate
+        aggregate_completed = completed.groupby([p.name for p in parameters]
+                                                + ['Status']) \
+                                       .agg({'Objective': ['mean', 'var', 'count'],
+                                             'Iteration': 'max'})
+
+        # flatten hierarchical column names
+        aggregate_completed.columns = [''.join(c.capitalize() for c in col).strip()
+                                       for col in
+                                       aggregate_completed.columns.values]
+
+        # add variance and finalize
+        aggregate_completed = aggregate_completed.reset_index() \
+            .assign(
+            ObjectiveStdErr=lambda x: numpy.sqrt(x['ObjectiveVar'] / (x['ObjectiveCount'] - 1))) \
+            .rename({'IterationMax': 'Iteration'}, axis=1) \
+            .query("ObjectiveCount >= {}".format(
+            min_count))
+
+        aggregate_intermediate = intermediate.groupby([p.name for p in parameters]
+                                                      + ['Status', 'Iteration']) \
+            .agg({'Objective': ['mean', 'var', 'count']})
+        aggregate_intermediate.columns = [
+            ''.join(c.capitalize() for c in col).strip() for col in
+            aggregate_intermediate.columns.values]
+
+        aggregate_intermediate = aggregate_intermediate.reset_index() \
+            .assign(
+            ObjectiveStdErr=lambda x: numpy.sqrt(x['ObjectiveVar'] / (x['ObjectiveCount'] - 1))) \
+            .query("ObjectiveCount >= {}".format(
+            min_count))
+
+        full_results = pandas.concat([aggregate_intermediate,
+                                      aggregate_completed],
+                                     sort=False)\
+            .rename({"ObjectiveMean": "Objective"}, axis=1)
+
+        return full_results
 
 
 class RandomSearch(Algorithm):
@@ -144,33 +244,18 @@ class RandomSearch(Algorithm):
         max_num_trials (int): number of trials, otherwise runs indefinitely.
         repeat (int): number of times to repeat a parameter configuration.
     """
-    def __init__(self, max_num_trials=None, repeat=1):
-        self.i = 0  # number of sampled configs
-        self.n = max_num_trials or 2**32  # total number of configs to be sampled
-        self.m = repeat  # number of times to repeat each config
-        self.j = 0  # number of trials submitted with this config
-        self.theta_i = {}  # current parameter config
+    allows_repetition = True
+
+    def __init__(self, max_num_trials=None):
+        self.max_num_trials = max_num_trials or 2**32  # total number of configs to be sampled
+        self.count = 0
 
     def get_suggestion(self, parameters, results=None, lower_is_better=True):
-        # If number of repetitions are reached set them back to zero
-        if self.j == self.m:
-            self.j = 0
-
-        # If there are no repetitions yet, sample a new config
-        if self.j == 0:
-            self.theta_i = {p.name: p.sample() for p in parameters}
-            self.i += 1
-
-        # If the maximum number of configs is reached, return None
-        if self.i > self.n:
-            return None
-        # Else increase the count of this config by one and return it
+        if self.count >= self.max_num_trials:
+            return AlgorithmState.DONE
         else:
-            self.j += 1
-            return self.theta_i
-
-
-                
+            self.count += 1
+            return {p.name: p.sample() for p in parameters}
 
 class Iterate(Algorithm):
     """
@@ -179,6 +264,8 @@ class Iterate(Algorithm):
     Args:
         hp_iter (list): list of fully-specified hyperparameter dicts. 
     """
+    allows_repetition = True
+
     def __init__(self, hp_iter):
         self.hp_iter = hp_iter
         self.count = 0
@@ -247,57 +334,40 @@ class GridSearch(Algorithm):
         num_grid_points (int): number of grid points for continuous / discrete.
 
     """
-    def __init__(self, num_grid_points=2, repeat=1):
+    allows_repetition = True
+
+    def __init__(self, num_grid_points=2):
         self.grid = None
         self.num_grid_points = num_grid_points
-        self.i = 0  # number of sampled configs
-        self.m = repeat  # number of times to repeat each config
-        self.j = 0  # number of trials submitted with this config
-        self.theta_i = {}  # current parameter config
+        self.count = 0  # number of sampled configs
 
     def get_suggestion(self, parameters, results=None, lower_is_better=True):
-        if self.i == 0 and self.j == 0:
+        if self.count == 0:
             param_dict = self._get_param_dict(parameters)
             self.grid = list(sklearn.model_selection.ParameterGrid(param_dict))
-        
-        # If number of repetitions are reached set them back to zero
-        if self.j == self.m:
-            self.j = 0
-            self.i += 1
 
-        # If the maximum number of configs is reached, return None
-        if self.i == len(self.grid):
-            return None
-        # Else increase the count of this config by one and return it
+        if self.count >= len(self.grid):
+            return AlgorithmState.DONE
         else:
-            # If there are no repetitions yet, get a new config
-            if self.j == 0:
-                self.theta_i = self.grid[self.i]
-            
-            self.j += 1
-            return self.theta_i
+            config = self.grid[self.count]
+            self.count += 1
+            return config
 
     def _get_param_dict(self, parameters):
         param_dict = {}
         for p in parameters:
             if isinstance(p, Continuous) or isinstance(p, Discrete):
-                values = []
-                for i in range(self.num_grid_points):
-                    if p.scale == 'log':
-                        v = numpy.log10(p.range[1]) - numpy.log10(p.range[0])
-                        v *= (i + 1) / (self.num_grid_points + 1)
-                        v += numpy.log10(p.range[0])
-                        v = 10**v
-                        if isinstance(p, Discrete):
-                            v = int(v)
-                        values.append(v)
-                    else:
-                        v = p.range[1]-p.range[0]
-                        v *= (i + 1)/(self.num_grid_points + 1)
-                        v += p.range[0]
-                        if isinstance(p, Discrete):
-                            v = int(v)
-                        values.append(v)
+                dtype = int if isinstance(p, Discrete) else float
+                if p.scale == 'log':
+                    func = numpy.logspace
+                    range = [numpy.log10(x) for x in p.range]
+                else:
+                    func = numpy.linspace
+                    range = p.range
+                values = func(*range,
+                              num=self.num_grid_points,
+                              endpoint=True,
+                              dtype=dtype)
             else:
                 values = p.range
             param_dict[p.name] = values
@@ -319,6 +389,8 @@ class LocalSearch(Algorithm):
         repeat_trials (int): number of times that identical configurations are
             repeated to test for random fluctuations.
     """
+    allows_repetition = True
+
     def __init__(self, seed_configuration, perturbation_factors=(0.8, 1.2), repeat_trials=1):
         self.seed_configuration = seed_configuration
         self.count = 0
@@ -543,6 +615,7 @@ class PopulationBasedTraining(Algorithm):
     third generation etc.
 
     Args:
+        num_generations (int): the number of generations to run for.
         population_size (int): the number of randomly intialized trials at the
             beginning and number of concurrent trials after that.
         parameter_range (dict[Union[list,tuple]): upper and lower bounds beyond
@@ -551,8 +624,9 @@ class PopulationBasedTraining(Algorithm):
             parameters are multiplied upon perturbation; one is sampled randomly
             at a time.
     """
-    def __init__(self, population_size=20, parameter_range={},
-                 perturbation_factors=(0.8, 1.0, 1.2)):
+    def __init__(self, num_generations, population_size=20, parameter_range={},
+                 perturbation_factors=(0.8, 1.2)):
+        self.num_generations = num_generations
         self.population_size = population_size
         self.parameter_range = parameter_range
         self.perturbation_factors = perturbation_factors
@@ -570,6 +644,8 @@ class PopulationBasedTraining(Algorithm):
             trial['lineage'] = ''
             trial['load_from'] = ''
             trial['save_to'] = str(self.count)
+        elif self.generation > self.num_generations:
+            return AlgorithmState.DONE
         else:
             trial = self._truncation_selection(parameters=parameters,
                                                results=results,
@@ -590,17 +666,23 @@ class PopulationBasedTraining(Algorithm):
         """
         # Select correct generation and sort generation members
         completed = results.loc[results['Status'] == 'COMPLETED', :]
-        generation_df = completed.loc[(completed.generation
-                                       == self.generation - 1), :]\
-                                 .sort_values(by='Objective',
-                                              ascending=lower_is_better)
+
 
         if (self.count - 1) % self.population_size / self.population_size < 0.8:
             # Go through top 80% of generation
+            generation_df = completed.loc[(completed.generation
+                                           == self.generation - 1), :] \
+                                     .sort_values(by='Objective',
+                                                  ascending=lower_is_better)
             d = generation_df.iloc[(self.count - 1) % self.population_size].to_dict()
         else:
-            # For the rest, sample from top 20% and perturb
-            idx = numpy.random.randint(low=0, high=self.population_size//5)
+            # For the rest, sample from top 20% of the last generation
+            target_generations = [self.generation - 1]
+            generation_df = completed.loc[(completed.generation.isin(
+                target_generations)), :] \
+                                     .sort_values(by='Objective',
+                                                  ascending=lower_is_better)
+            idx = sherpa_rng.randint(low=0, high=self.population_size*len(target_generations)//5)
             d = generation_df.iloc[idx].to_dict()
             d = self._perturb(candidate=d, parameters=parameters)
         trial = {param.name: d[param.name] for param in parameters}
@@ -621,7 +703,7 @@ class PopulationBasedTraining(Algorithm):
         """
         for param in parameters:
             if isinstance(param, Continuous) or isinstance(param, Discrete):
-                factor = numpy.random.choice(self.perturbation_factors)
+                factor = sherpa_rng.choice(self.perturbation_factors)
                 candidate[param.name] *= factor
 
                 if isinstance(param, Discrete):
@@ -632,7 +714,7 @@ class PopulationBasedTraining(Algorithm):
                                                    max(self.parameter_range.get(param.name) or param.range))
 
             elif isinstance(param, Ordinal):
-                shift = numpy.random.choice([-1, 0, +1])
+                shift = sherpa_rng.choice([-1, 0, +1])
                 values = self.parameter_range.get(param.name) or param.range
                 newidx = values.index(candidate[param.name]) + shift
                 newidx = numpy.clip(newidx, 0, len(values)-1)
@@ -670,7 +752,7 @@ class Genetic(Algorithm):
                                              lower_is_better)
         params_values_for_next_trial = {}
         for param_name in trial_1_params.keys():
-            param_origin = numpy.random.random()  # randomly choose where to get the value from
+            param_origin = sherpa_rng.random_sample()  # randomly choose where to get the value from
             if param_origin < self.mutation_rate:  # Use mutation
                 for parameter_object in parameters:
                     if param_name == parameter_object.name:
@@ -707,7 +789,7 @@ class Genetic(Algorithm):
             return trial_param_values
         population = population.sort_values(by='Objective',
                                             ascending=lower_is_better)
-        idx = numpy.random.randint(low=0, high=population.shape[
+        idx = sherpa_rng.randint(low=0, high=population.shape[
                                                    0] // 3)  # pick randomly among top 33%
         trial_all_values = population.iloc[
             idx].to_dict()  # extract the trial values on results table
